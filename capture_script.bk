@@ -1,0 +1,109 @@
+#!/usr/local/bin/python
+
+import couchdb
+import sys
+import os.path
+import capture
+import argparse
+import datetime
+
+
+def connectToDB(dbName):
+    status = "ok"
+    db = {}
+    try:
+        db = couch[dbName]
+    except:
+        print "Failed to connect to database:" + dbName
+        status = "bad"
+    return status, db
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="script to take photos of detector")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-c", "--calibration", action="store_true")
+    group.add_argument("-r", "--ropes", action="store_true")
+    parser.add_argument("--run", type=int, help="run number")
+    parser.add_argument("--norun", action="store_true", help="use if calibration is not associated with a run")
+    parser.add_argument("--led", type=int, help="led number")
+    parser.add_argument("--light", type=int, help="light number")
+    args = parser.parse_args()
+
+    directory_name = os.path.expanduser("~") + "/captures/"
+    if args.calibration:
+        directory_name += "calibration/"
+        if args.run!=None and args.norun==None:
+            directory_name += str(args.run) + "/"
+        elif args.run==None and args.norun!=None:
+            directory_name += "no_run/"
+        else:
+            print "for calibration runs you need to select a run number (option --run ##) or specify no run option (option --norun)"
+            sys.exit(13)
+    elif args.ropes:
+        directory_name += "rope_net/"
+    else:
+        print "need to select calibration run (option -c) or rope net run (option -r)"
+        sys.exit(13)
+    timestamp = datetime.datetime.utcnow()
+    directory_name += timestamp.isoformat() + "UTC/"
+
+
+    if os.path.exists(directory_name):
+        folder_number=int(0);
+        while os.path.exists(directory_name + "_" + str(folder_number)):
+            folder_number += 1
+        directory_name += "_" + str(folder_number)
+    os.makedirs(directory_name)
+
+
+    #attempt to capture images
+    errorFlag,captureTime,activeCams=capture.py_capture(directory_name)
+    if(errorFlag!=0):
+        sys.exit(errorFlag)
+
+    #upload captured images and logfiles to database
+
+    dbName='cameras'
+
+    #arguments to be passed from capture executable
+    #open couchdb server and database where images from capture are to be posted
+
+    couch = couchdb.Server()
+    #couch = couchdb.Server('http://couch.ug.snopl.us')
+    #couch.resource.credentials = ('snoplus', 'scintillate')
+
+    dbstatus, db = connectToDB(dbName)
+    #create a new document for the capture and write captureTime and runNumber to it (run number will have to be passed to this script somehow)
+    #note that timestamp is the start time of the capture run and not the database upload time or the timestamp on any particular image
+    if(dbstatus is "ok"):
+        if args.calibration:
+            doc_id, doc_rev = db.save({'timestamp':int(captureTime),'run_number':args.run,'run_description':'calibration', 'active_cameras':activeCams,'LED_number':args.led,'log':'NA'})
+        elif args.ropes:
+            doc_id, doc_rev = db.save({'timestamp':int(captureTime),'run_description':'rope-net', 'active_cameras':activeCams,'light_number':args.light,'log':'NA'})
+        doc=db[doc_id]
+        #search directory_name for logfiles and image files and upload to database as attatchments (or as a string in the logfile case)
+        try:
+            captureDirectory= os.listdir (directory_name)
+        except:
+            sys.exit(14)
+        for filename in captureDirectory:
+            if filename.lower().endswith('.nef'):
+                image=open(directory_name+filename)
+                db.put_attachment(doc,image,None,'image/x-nikon-nef')
+            elif filename.lower().endswith('.jpg'):
+                image=open(directory_name+filename)
+                db.put_attachment(doc,image,None,'image/jpg')
+            elif filename.lower().endswith('.log'):
+                logfile=open(directory_name+filename)
+                try:
+                    logstring=logfile.read()
+                    doc=db[doc_id]
+                    doc['log']=logstring
+                    db[doc_id]=doc
+                except:
+                    sys.exit(12)
+        sys.exit(0)
+    else:
+        sys.exit(11)
+    
